@@ -1,0 +1,14 @@
+{
+  "name": "asin-redirect-checker",
+  "version": "1.0.0",
+  "description": "Syncrosale envanterindeki ASIN'lerin Amazon'da farklı varyasyona yönlendirilip yönlendirilmediğini kontrol eder",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node index.js"
+  },
+  "dependencies": {
+    "puppeteer": "^24.0.0",
+    "xlsx": "^0.18.5"
+  }
+}
