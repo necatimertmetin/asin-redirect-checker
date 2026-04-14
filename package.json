@@ -8,7 +8,7 @@
     "check": "node index.js"
   },
   "dependencies": {
-    "puppeteer": "^24.0.0",
+    "puppeteer": "^24.40.0",
     "xlsx": "^0.18.5"
   }
 }

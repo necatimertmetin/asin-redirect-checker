@@ -457,6 +457,32 @@ async function main() {
   console.log("║  Syncrosale Envanter → Amazon Redirect Testi    ║");
   console.log("╚══════════════════════════════════════════════════╝");
 
+  // Eğer parametre olarak bir ASIN verildiyse sadece onu kontrol et
+  const arg = process.argv[2];
+  if (arg && /^[A-Z0-9]{10}$/i.test(arg)) {
+    // Tek ASIN kontrolü (önce Puppeteer ile dene)
+    console.log(`\n🔎 Tekil ASIN kontrolü (Puppeteer): ${arg}\n`);
+    let result;
+    try {
+      const { checkAsinWithPuppeteer } = await import("./check-asin-puppeteer.js");
+      result = await checkAsinWithPuppeteer(arg, { waitMs: 10000 });
+    } catch (e) {
+      console.log("❌ Puppeteer ile kontrol başarısız: ", e.message);
+      console.log("npm install puppeteer komutunu çalıştırın.");
+      process.exit(1);
+    }
+    console.log(result);
+    if (result.status === "REDIRECTED") {
+      console.log(`\n🔀 Yönlendirildi: ${result.originalAsin} → ${result.finalAsin}`);
+      console.log(`URL: ${result.finalUrl}`);
+    } else if (result.status === "OK") {
+      console.log("\n✅ Yönlendirme yok, ASIN aynı kaldı.");
+    } else {
+      console.log(`\n❌ Hata: ${result.error || result.status}`);
+    }
+    return;
+  }
+
   // Hesap seç
   const account = await selectAccount();
 
