@@ -26,6 +26,13 @@ const accounts = {
     environment: "production",
     storeId: 1,
   },
+
+  bati: {
+    username: "westglobal",
+    password: "Sesa2021.",
+    environment: "production",
+    storeId: 1,
+  },
 };
 
 const EXPORT_DIR = "exports";
