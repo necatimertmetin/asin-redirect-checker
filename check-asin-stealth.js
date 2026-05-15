@@ -235,14 +235,15 @@ export async function checkAsinsWithStealth(asins, options = {}) {
   const pages = [];
 
   for (let i = 0; i < concurrency; i++) {
-    const browser = await puppeteerExtra.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-blink-features=AutomationControlled",
-      ],
-    });
+   const browser = await puppeteerExtra.launch({
+  executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  headless: true,
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-blink-features=AutomationControlled",
+  ],
+});
     const page = await browser.newPage();
     await page.setViewport({
       width: 1280 + Math.floor(Math.random() * 120),
