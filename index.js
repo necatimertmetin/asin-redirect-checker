@@ -673,7 +673,7 @@ function printReport(results) {
 
 // ==================== NO_DATA MD RAPORU ====================
 
-function generateNoDataReport(amazonResults, totalNotFound, storeId, status = "IN_PROGRESS") {
+function generateNoDataReport(amazonResults, totalNotFound, storeId, syncroDataMap = {}, status = "IN_PROGRESS") {
   const okResults = amazonResults.filter((r) => r.status === "OK");
   const redirected = amazonResults.filter((r) => r.status === "REDIRECTED");
   const captcha = amazonResults.filter((r) => r.status === "CAPTCHA");
@@ -741,6 +741,33 @@ function generateNoDataReport(amazonResults, totalNotFound, storeId, status = "I
   md += `| **Toplam sorunlu** | **${fmt(detailIssues.length)}** | **%${pct(detailIssues.length, okResults.length)}** | \`${bar(detailIssues.length, okResults.length)}\` |\n`;
   md += `\n---\n\n`;
 
+  const stockLabel = (v) =>
+    v === null ? "-" : v >= 1000 ? "In Stock" : v === 0 ? "Out of Stock" : String(v);
+
+  const asinRow = (item) => {
+    const p = item.fields.price !== null ? `$${item.fields.price.toFixed(2)}` : "-";
+    const s = stockLabel(item.fields.stock);
+    return `| \`${item.asin}\` | ${p} | ${s} |\n`;
+  };
+  const healthyRow = (r) => {
+    const p = r.price !== null ? `$${r.price.toFixed(2)}` : "-";
+    const s = stockLabel(r.stock);
+    const sd = syncroDataMap[r.originalAsin] || {};
+    const sp = sd.price != null ? `$${Number(sd.price).toFixed(2)}` : "-";
+    const ss = stockLabel(sd.stock ?? null);
+    return `| \`${r.originalAsin}\` | ${p} | ${s} | ${sp} | ${ss} |\n`;
+  };
+  const tableHeader = `| ASIN | Price | Stock |\n|:-----|------:|------:|\n`;
+  const healthyTableHeader = `| ASIN | Amazon Price | Amazon Stock | Syncrosale Price | Syncrosale Stock |\n|:-----|------:|------:|------:|------:|\n`;
+
+  if (healthyAsins.length > 0) {
+    md += `## ✅ Sorunsuz ASIN'ler *(${fmt(healthyAsins.length)} ürün)*\n\n`;
+    md += `Amazon'da hem fiyat hem stok bilgisi eksiksiz olan ürünler.\n\n`;
+    md += healthyTableHeader;
+    for (const r of healthyAsins) md += healthyRow(r);
+    md += `\n---\n\n`;
+  }
+
   if (redirected.length > 0) {
     md += `## 🔀 Yönlendirilen ASIN'ler *(${fmt(redirected.length)} adet)*\n\n`;
     md += `| Orijinal ASIN | Yönlendirilen ASIN | URL |\n`;
@@ -748,40 +775,6 @@ function generateNoDataReport(amazonResults, totalNotFound, storeId, status = "I
     for (const r of redirected) {
       md += `| \`${r.originalAsin}\` | \`${r.finalAsin || "-"}\` | ${r.finalUrl || "-"} |\n`;
     }
-    md += `\n---\n\n`;
-  }
-
-  const asinRow = (item) => {
-    const p = item.fields.price !== null ? `$${item.fields.price.toFixed(2)}` : "-";
-    const s =
-      item.fields.stock !== null
-        ? item.fields.stock >= 1000
-          ? "In Stock"
-          : item.fields.stock === 0
-            ? "Out of Stock"
-            : item.fields.stock
-        : "-";
-    return `| \`${item.asin}\` | ${p} | ${s} |\n`;
-  };
-  const healthyRow = (r) => {
-    const p = r.price !== null ? `$${r.price.toFixed(2)}` : "-";
-    const s =
-      r.stock !== null
-        ? r.stock >= 1000
-          ? "In Stock"
-          : r.stock === 0
-            ? "Out of Stock"
-            : r.stock
-        : "-";
-    return `| \`${r.originalAsin}\` | ${p} | ${s} |\n`;
-  };
-  const tableHeader = `| ASIN | Price | Stock |\n|:-----|------:|------:|\n`;
-
-  if (healthyAsins.length > 0) {
-    md += `## ✅ Sorunsuz ASIN'ler *(${fmt(healthyAsins.length)} ürün)*\n\n`;
-    md += `Amazon'da hem fiyat hem stok bilgisi eksiksiz olan ürünler.\n\n`;
-    md += tableHeader;
-    for (const r of healthyAsins) md += healthyRow(r);
     md += `\n---\n\n`;
   }
 
@@ -926,7 +919,9 @@ async function main() {
     printReport(results);
   } else if (menuChoice === "2") {
     const asinCacheFile = `NO_DATA_asins_store${CONFIG.STORE_ID}.txt`;
+    const syncroCacheFile = `NO_DATA_syncro_store${CONFIG.STORE_ID}.json`;
     let notFoundAsins;
+    let syncroDataMap = {};
 
     if (fs.existsSync(asinCacheFile)) {
       console.log(`\n📂 Cache dosyası bulundu: ${asinCacheFile}`);
@@ -935,6 +930,11 @@ async function main() {
         .map((l) => l.trim())
         .filter(Boolean);
       console.log(`   ${notFoundAsins.length} ASIN cache'den yüklendi.`);
+      if (fs.existsSync(syncroCacheFile)) {
+        try {
+          syncroDataMap = JSON.parse(fs.readFileSync(syncroCacheFile, "utf8"));
+        } catch {}
+      }
     } else {
       let notFoundProducts;
       try {
@@ -953,7 +953,15 @@ async function main() {
       }
 
       notFoundAsins = notFoundProducts.map((p) => p.asin);
+      for (const p of notFoundProducts) {
+        if (!p.asin) continue;
+        syncroDataMap[p.asin] = {
+          price: p.price?.finalPrice ?? p.finalPrice ?? null,
+          stock: p.stock ?? null,
+        };
+      }
       fs.writeFileSync(asinCacheFile, notFoundAsins.join("\n"), "utf8");
+      fs.writeFileSync(syncroCacheFile, JSON.stringify(syncroDataMap), "utf8");
       console.log(`\n💾 ${notFoundAsins.length} ASIN cache'e yazıldı: ${asinCacheFile}`);
     }
 
@@ -997,7 +1005,7 @@ async function main() {
         printStealthProgress(completed);
 
         if (completed % CONFIG.SAVE_EVERY_MD === 0) {
-          const mdContent = generateNoDataReport(accumulatedResults, total, CONFIG.STORE_ID, "IN_PROGRESS");
+          const mdContent = generateNoDataReport(accumulatedResults, total, CONFIG.STORE_ID, syncroDataMap, "IN_PROGRESS");
           fs.writeFileSync(reportFile, mdContent);
         }
       },
@@ -1007,7 +1015,7 @@ async function main() {
     printReport(amazonResults);
 
     // Final MD raporu
-    const finalMd = generateNoDataReport(amazonResults, total, CONFIG.STORE_ID, "COMPLETE");
+    const finalMd = generateNoDataReport(amazonResults, total, CONFIG.STORE_ID, syncroDataMap, "COMPLETE");
     fs.writeFileSync(reportFile, finalMd);
     console.log(`\n📄 Markdown raporu kaydedildi: ${reportFile}`);
 
