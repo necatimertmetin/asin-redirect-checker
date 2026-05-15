@@ -1,6 +1,7 @@
 import readline from "readline";
 import fs from "fs";
 import * as cheerio from "cheerio";
+import { checkAsinsWithStealth } from "./check-asin-stealth.js";
 
 // ==================== ACCOUNTS ====================
 const ACCOUNTS = {
@@ -60,14 +61,15 @@ const CONFIG = {
   DELAY_BETWEEN_MS: 500, // İstekler arası bekleme (rate limit)
 
   // Concurrency
-  CONCURRENCY: 5, // Aynı anda kaç istek
+  CONCURRENCY: 20, // Aynı anda kaç istek
 
   // Pagination
   PAGE_SIZE: 100, // API'den kaç ürün çekilecek (sayfa başına)
   MAX_PRODUCTS: null, // null = hepsini çek, sayı = limit
 
   // Kayıt
-  SAVE_EVERY: 500, // Kaç ASIN'de bir dosyaya kaydet
+  SAVE_EVERY: 500, // Kaç ASIN'de bir dosyaya kaydet (JSON)
+  SAVE_EVERY_MD: 10, // Kaç ASIN'de bir MD raporu güncelle
 };
 // ========================================================
 
@@ -292,6 +294,8 @@ async function fetchAllNotFoundProducts(storeId, token) {
 // Java'daki AmazonProductPageParser + BaseAmazonParser mantığı
 
 const PRICE_SELECTORS = [
+  "#apex-pricetopay-accessibility-label",
+  ".aok-offscreen",
   "#priceblock_ourprice",
   "#priceblock_dealprice",
   "#priceblock_saleprice",
@@ -319,16 +323,18 @@ function parsePriceString(str) {
 
 // AmazonProductPageParser.extractMainPrice
 function extractPriceFromHtml($) {
-  const container = $("#corePriceDisplay_desktop_feature_div");
-  if (!container.length) return null;
   for (const sel of PRICE_SELECTORS) {
-    const el = container.find(sel).first();
+    const el = $(sel).first();
     if (el.length) {
       const price = parsePriceString(el.text().trim());
       if (price !== null && price > 0) return price;
     }
   }
   return null;
+}
+
+function isValidProductPage($) {
+  return $("#productTitle").length > 0 || $("[data-feature-name='title']").length > 0;
 }
 
 // AmazonProductPageParser.extractStock
@@ -460,6 +466,19 @@ async function checkAsin(asin, parseDetails = false) {
         hasCaptchaForm;
 
       if (isRobotCheck) {
+        return {
+          originalAsin: asin,
+          finalAsin: null,
+          finalUrl,
+          status: "CAPTCHA",
+          redirected: false,
+          price: null,
+          stock: null,
+        };
+      }
+
+      // Soft bot-block: Amazon served a structureless page without redirecting to captcha
+      if (!isValidProductPage($)) {
         return {
           originalAsin: asin,
           finalAsin: null,
@@ -652,6 +671,162 @@ function printReport(results) {
  * JSON olarak sonuçları kaydet (artık checkAllAsins içinde yapılıyor)
  */
 
+// ==================== NO_DATA MD RAPORU ====================
+
+function generateNoDataReport(amazonResults, totalNotFound, storeId, status = "IN_PROGRESS") {
+  const okResults = amazonResults.filter((r) => r.status === "OK");
+  const redirected = amazonResults.filter((r) => r.status === "REDIRECTED");
+  const captcha = amazonResults.filter((r) => r.status === "CAPTCHA");
+  const errors = amazonResults.filter((r) => r.status === "ERROR");
+
+  const detailIssues = [];
+  for (const result of okResults) {
+    const issues = [];
+    if (result.price === null) issues.push("price bulunamadı (Amazon)");
+    else if (result.price <= 0) issues.push(`price geçersiz (${result.price})`);
+    if (result.stock === null || result.stock <= 0) issues.push("stok yok (Amazon)");
+    if (issues.length > 0) {
+      detailIssues.push({ asin: result.originalAsin, issues, fields: { price: result.price, stock: result.stock } });
+    }
+  }
+
+  const onlyPriceIssue = detailIssues.filter(
+    (i) => i.issues.some((x) => x.includes("price")) && !i.issues.some((x) => x.includes("stok"))
+  );
+  const onlyStockIssue = detailIssues.filter(
+    (i) => !i.issues.some((x) => x.includes("price")) && i.issues.some((x) => x.includes("stok"))
+  );
+  const bothIssues = detailIssues.filter(
+    (i) => i.issues.some((x) => x.includes("price")) && i.issues.some((x) => x.includes("stok"))
+  );
+  const healthyAsins = okResults.filter(
+    (r) => !detailIssues.some((d) => d.asin === r.originalAsin)
+  );
+  const healthyCount = healthyAsins.length;
+
+  const checked = amazonResults.length;
+  const pct = (n, d) => (d === 0 ? "0.0" : ((n / d) * 100).toFixed(1));
+  const bar = (n, d, w = 24) => {
+    const filled = d === 0 ? 0 : Math.round((n / d) * w);
+    return "█".repeat(filled) + "░".repeat(w - filled);
+  };
+  const fmt = (n) => n.toLocaleString("tr-TR");
+  const now = new Date().toISOString();
+
+  let md = "";
+  md += `# NO_DATA Ürün Analiz Raporu\n\n`;
+  md += `**Tarih:** ${now}  \n`;
+  md += `**Store ID:** ${storeId}  \n`;
+  md += `**Durum:** ${status === "COMPLETE" ? "✅ Tamamlandı" : `⏳ Devam ediyor (${fmt(checked)}/${fmt(totalNotFound)})`}\n\n`;
+  md += `---\n\n`;
+
+  md += `## 📋 Genel Özet\n\n`;
+  md += `Toplam **${fmt(totalNotFound)}** NO_DATA ürün içinden **${fmt(checked)}** Amazon'da kontrol edildi.\n\n`;
+  md += `| Amazon Durumu | Sayı | Oran | Grafik |\n`;
+  md += `|--------------|-----:|-----:|--------|\n`;
+  md += `| ✅ Geçerli (OK) | ${fmt(okResults.length)} | %${pct(okResults.length, checked)} | \`${bar(okResults.length, checked)}\` |\n`;
+  md += `| 🔀 Yönlendirilen | ${fmt(redirected.length)} | %${pct(redirected.length, checked)} | \`${bar(redirected.length, checked)}\` |\n`;
+  md += `| 🤖 Captcha | ${fmt(captcha.length)} | %${pct(captcha.length, checked)} | \`${bar(captcha.length, checked)}\` |\n`;
+  md += `| ❌ Hata | ${fmt(errors.length)} | %${pct(errors.length, checked)} | \`${bar(errors.length, checked)}\` |\n`;
+  md += `\n---\n\n`;
+
+  md += `## 📊 Price / Stock Analizi\n\n`;
+  md += `> Amazon'da geçerli bulunan **${fmt(okResults.length)}** ürün üzerinden.\n\n`;
+  md += `| Kategori | Sayı | Oran | Grafik |\n`;
+  md += `|---------|-----:|-----:|--------|\n`;
+  md += `| ✅ Sorunsuz (price ✓, stock ✓) | ${fmt(healthyCount)} | %${pct(healthyCount, okResults.length)} | \`${bar(healthyCount, okResults.length)}\` |\n`;
+  md += `| 🔴 Sadece price sorunu | ${fmt(onlyPriceIssue.length)} | %${pct(onlyPriceIssue.length, okResults.length)} | \`${bar(onlyPriceIssue.length, okResults.length)}\` |\n`;
+  md += `| 🟡 Sadece stok sorunu | ${fmt(onlyStockIssue.length)} | %${pct(onlyStockIssue.length, okResults.length)} | \`${bar(onlyStockIssue.length, okResults.length)}\` |\n`;
+  md += `| 🟠 Price + Stok sorunu | ${fmt(bothIssues.length)} | %${pct(bothIssues.length, okResults.length)} | \`${bar(bothIssues.length, okResults.length)}\` |\n`;
+  md += `| **Toplam sorunlu** | **${fmt(detailIssues.length)}** | **%${pct(detailIssues.length, okResults.length)}** | \`${bar(detailIssues.length, okResults.length)}\` |\n`;
+  md += `\n---\n\n`;
+
+  if (redirected.length > 0) {
+    md += `## 🔀 Yönlendirilen ASIN'ler *(${fmt(redirected.length)} adet)*\n\n`;
+    md += `| Orijinal ASIN | Yönlendirilen ASIN | URL |\n`;
+    md += `|:-------------|:------------------|:----|\n`;
+    for (const r of redirected) {
+      md += `| \`${r.originalAsin}\` | \`${r.finalAsin || "-"}\` | ${r.finalUrl || "-"} |\n`;
+    }
+    md += `\n---\n\n`;
+  }
+
+  const asinRow = (item) => {
+    const p = item.fields.price !== null ? `$${item.fields.price.toFixed(2)}` : "-";
+    const s =
+      item.fields.stock !== null
+        ? item.fields.stock >= 1000
+          ? "In Stock"
+          : item.fields.stock === 0
+            ? "Out of Stock"
+            : item.fields.stock
+        : "-";
+    return `| \`${item.asin}\` | ${p} | ${s} |\n`;
+  };
+  const healthyRow = (r) => {
+    const p = r.price !== null ? `$${r.price.toFixed(2)}` : "-";
+    const s =
+      r.stock !== null
+        ? r.stock >= 1000
+          ? "In Stock"
+          : r.stock === 0
+            ? "Out of Stock"
+            : r.stock
+        : "-";
+    return `| \`${r.originalAsin}\` | ${p} | ${s} |\n`;
+  };
+  const tableHeader = `| ASIN | Price | Stock |\n|:-----|------:|------:|\n`;
+
+  if (healthyAsins.length > 0) {
+    md += `## ✅ Sorunsuz ASIN'ler *(${fmt(healthyAsins.length)} ürün)*\n\n`;
+    md += `Amazon'da hem fiyat hem stok bilgisi eksiksiz olan ürünler.\n\n`;
+    md += tableHeader;
+    for (const r of healthyAsins) md += healthyRow(r);
+    md += `\n---\n\n`;
+  }
+
+  if (onlyPriceIssue.length > 0) {
+    md += `## 🔴 Sadece Price Sorunu *(${fmt(onlyPriceIssue.length)} ürün)*\n\n`;
+    md += `Amazon sayfasında fiyat bilgisi bulunamayan veya geçersiz olan ürünler.\n\n`;
+    md += tableHeader;
+    for (const item of onlyPriceIssue) md += asinRow(item);
+    md += `\n---\n\n`;
+  }
+
+  if (onlyStockIssue.length > 0) {
+    md += `## 🟡 Sadece Stok Sorunu *(${fmt(onlyStockIssue.length)} ürün)*\n\n`;
+    md += `Fiyatı olan fakat Amazon'da stokta bulunmayan ürünler.\n\n`;
+    md += tableHeader;
+    for (const item of onlyStockIssue) md += asinRow(item);
+    md += `\n---\n\n`;
+  }
+
+  if (bothIssues.length > 0) {
+    md += `## 🟠 Price + Stok Sorunu *(${fmt(bothIssues.length)} ürün)*\n\n`;
+    md += `Amazon sayfasında hem fiyat hem stok bilgisi eksik/geçersiz olan ürünler.\n\n`;
+    md += tableHeader;
+    for (const item of bothIssues) md += asinRow(item);
+    md += `\n---\n\n`;
+  }
+
+  if (captcha.length > 0) {
+    md += `## 🤖 Captcha'ya Takılan ASIN'ler *(${fmt(captcha.length)} adet)*\n\n`;
+    md += captcha.map((r) => `- \`${r.originalAsin}\``).join("\n");
+    md += `\n\n---\n\n`;
+  }
+
+  if (errors.length > 0) {
+    md += `## ❌ Hata Alan ASIN'ler *(${fmt(errors.length)} adet)*\n\n`;
+    md += `| ASIN | Hata |\n|:-----|:-----|\n`;
+    for (const r of errors) {
+      md += `| \`${r.originalAsin}\` | ${r.error || "-"} |\n`;
+    }
+    md += `\n`;
+  }
+
+  return md;
+}
+
 // ==================== MAIN ====================
 async function main() {
   console.log("╔══════════════════════════════════════════════════╗");
@@ -750,215 +925,128 @@ async function main() {
     // Rapor
     printReport(results);
   } else if (menuChoice === "2") {
-    let notFoundProducts;
-    try {
-      notFoundProducts = await fetchAllNotFoundProducts(
-        CONFIG.STORE_ID,
-        CONFIG.TOKEN,
-      );
-    } catch (err) {
-      console.error("❌ NO_DATA ürünler çekilirken hata:", err.message);
-      process.exit(1);
+    const asinCacheFile = `NO_DATA_asins_store${CONFIG.STORE_ID}.txt`;
+    let notFoundAsins;
+
+    if (fs.existsSync(asinCacheFile)) {
+      console.log(`\n📂 Cache dosyası bulundu: ${asinCacheFile}`);
+      notFoundAsins = fs.readFileSync(asinCacheFile, "utf8")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      console.log(`   ${notFoundAsins.length} ASIN cache'den yüklendi.`);
+    } else {
+      let notFoundProducts;
+      try {
+        notFoundProducts = await fetchAllNotFoundProducts(
+          CONFIG.STORE_ID,
+          CONFIG.TOKEN,
+        );
+      } catch (err) {
+        console.error("❌ NO_DATA ürünler çekilirken hata:", err.message);
+        process.exit(1);
+      }
+
+      if (notFoundProducts.length === 0) {
+        console.log("⚠️  NO_DATA ürün bulunamadı.");
+        process.exit(0);
+      }
+
+      notFoundAsins = notFoundProducts.map((p) => p.asin);
+      fs.writeFileSync(asinCacheFile, notFoundAsins.join("\n"), "utf8");
+      console.log(`\n💾 ${notFoundAsins.length} ASIN cache'e yazıldı: ${asinCacheFile}`);
     }
 
-    if (notFoundProducts.length === 0) {
-      console.log("⚠️  NO_DATA ürün bulunamadı.");
-      process.exit(0);
-    }
-
-    const notFoundAsins = notFoundProducts.map((p) => p.asin);
+    const total = notFoundAsins.length;
     console.log(
-      `\n🌐 Amazon (${CONFIG.AMAZON_DOMAIN}) üzerinde ${notFoundAsins.length} ASIN kontrol ediliyor...`,
+      `\n🥷 Amazon'da ${total} ASIN stealth mod ile kontrol ediliyor (3 tarayıcı)...\n`,
     );
-    console.log(`   ${CONFIG.CONCURRENCY} eşzamanlı istek ile çalışılıyor\n`);
 
-    const amazonResults = await checkAllAsins(notFoundAsins, { parseDetails: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const reportFile = `NO_DATA_report_${ts}.md`;
+    const detailFile = `NO_DATA_detail_issues_${ts}.json`;
+
+    const accumulatedResults = [];
+    const startTime = Date.now();
+    let captchaCount = 0;
+    let okCount = 0;
+    let redirectCount = 0;
+
+    function printStealthProgress(completed) {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      const rate = (completed / (elapsed || 1)).toFixed(2);
+      const eta = completed > 0 ? ((total - completed) / rate / 60).toFixed(1) : "?";
+      process.stdout.write(
+        `\r  [${completed}/${total}] ⏱${elapsed}s | ${rate}/s | ETA: ${eta}m | ✅${okCount} 🤖${captchaCount} 🔀${redirectCount}   `,
+      );
+    }
+
+    const amazonResults = await checkAsinsWithStealth(notFoundAsins, {
+      concurrency: 3,
+      minDelayMs: 2000,
+      maxDelayMs: 5000,
+      parseDetails: true,
+      onResult: (result, completed) => {
+        accumulatedResults.push(result);
+        if (result.status === "CAPTCHA") captchaCount++;
+        else if (result.status === "OK") okCount++;
+        else if (result.status === "REDIRECTED") {
+          redirectCount++;
+          process.stdout.write(`\n  🔀 ${result.originalAsin} → ${result.finalAsin}\n`);
+        }
+        printStealthProgress(completed);
+
+        if (completed % CONFIG.SAVE_EVERY_MD === 0) {
+          const mdContent = generateNoDataReport(accumulatedResults, total, CONFIG.STORE_ID, "IN_PROGRESS");
+          fs.writeFileSync(reportFile, mdContent);
+        }
+      },
+    });
+
+    console.log("\n");
     printReport(amazonResults);
 
-    // ASIN geçerli (OK) olanlar için Amazon'dan parse edilen price/stock'u kontrol et
+    // Final MD raporu
+    const finalMd = generateNoDataReport(amazonResults, total, CONFIG.STORE_ID, "COMPLETE");
+    fs.writeFileSync(reportFile, finalMd);
+    console.log(`\n📄 Markdown raporu kaydedildi: ${reportFile}`);
+
+    // JSON özet
     const okResults = amazonResults.filter((r) => r.status === "OK");
-    if (okResults.length > 0) {
-      console.log(
-        `\n🔍 Amazon'da geçerli ${okResults.length} ASIN için price/stock kontrol ediliyor...`,
-      );
+    const redirected = amazonResults.filter((r) => r.status === "REDIRECTED");
+    const captcha = amazonResults.filter((r) => r.status === "CAPTCHA");
+    const errors = amazonResults.filter((r) => r.status === "ERROR");
 
-      const detailIssues = [];
-      for (const result of okResults) {
-        const issues = [];
-        if (result.price === null) issues.push("price bulunamadı (Amazon)");
-        else if (result.price <= 0) issues.push(`price geçersiz (${result.price})`);
-        if (result.stock === null || result.stock <= 0) issues.push("stok yok (Amazon)");
-
-        if (issues.length > 0) {
-          detailIssues.push({
-            asin: result.originalAsin,
-            issues,
-            fields: { price: result.price, stock: result.stock },
-          });
-        }
+    const detailIssues = [];
+    for (const result of okResults) {
+      const issues = [];
+      if (result.price === null) issues.push("price bulunamadı (Amazon)");
+      else if (result.price <= 0) issues.push(`price geçersiz (${result.price})`);
+      if (result.stock === null || result.stock <= 0) issues.push("stok yok (Amazon)");
+      if (issues.length > 0) {
+        detailIssues.push({ asin: result.originalAsin, issues, fields: { price: result.price, stock: result.stock } });
       }
-
-      if (detailIssues.length > 0) {
-        console.log("\n" + "-".repeat(80));
-        console.log("⚠️  EKSİK / GEÇERSİZ DETAY ALANLARI:");
-        console.log("-".repeat(80));
-        for (const item of detailIssues) {
-          console.log(`  ${item.asin}: ${item.issues.join(", ")}`);
-        }
-        console.log(
-          `\n  Toplam sorunlu ürün: ${detailIssues.length} / ${okResults.length}`,
-        );
-      } else {
-        console.log("\n✅ Geçerli tüm ürünlerin detay alanları eksiksiz.");
-      }
-
-      const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      const detailFile = `NO_DATA_detail_issues_${ts}.json`;
-      const redirected = amazonResults.filter((r) => r.status === "REDIRECTED");
-      const captcha = amazonResults.filter((r) => r.status === "CAPTCHA");
-      const errors = amazonResults.filter((r) => r.status === "ERROR");
-
-      fs.writeFileSync(
-        detailFile,
-        JSON.stringify(
-          {
-            timestamp: new Date().toISOString(),
-            totalNotFound: notFoundProducts.length,
-            amazonSummary: {
-              ok: okResults.length,
-              redirected: redirected.length,
-              captcha: captcha.length,
-              errors: errors.length,
-            },
-            detailIssues,
-          },
-          null,
-          2,
-        ),
-      );
-      console.log(`\n💾 Detay sorunları kaydedildi: ${detailFile}`);
-
-      // Markdown raporu
-      const reportFile = `NO_DATA_report_${ts}.md`;
-      const now = new Date().toISOString();
-
-      // Kategoriler
-      const onlyPriceIssue = detailIssues.filter(
-        (i) => i.issues.some((x) => x.includes("price")) && !i.issues.some((x) => x.includes("stok"))
-      );
-      const onlyStockIssue = detailIssues.filter(
-        (i) => !i.issues.some((x) => x.includes("price")) && i.issues.some((x) => x.includes("stok"))
-      );
-      const bothIssues = detailIssues.filter(
-        (i) => i.issues.some((x) => x.includes("price")) && i.issues.some((x) => x.includes("stok"))
-      );
-      const healthyCount = okResults.length - detailIssues.length;
-
-      const total = notFoundProducts.length;
-
-      const pct = (n, d) => d === 0 ? "0.0" : ((n / d) * 100).toFixed(1);
-      const bar = (n, d, w = 24) => {
-        const filled = d === 0 ? 0 : Math.round((n / d) * w);
-        return "█".repeat(filled) + "░".repeat(w - filled);
-      };
-      const fmt = (n) => n.toLocaleString("tr-TR");
-
-      let md = "";
-
-      md += `# NO_DATA Ürün Analiz Raporu\n\n`;
-      md += `**Tarih:** ${now}  \n`;
-      md += `**Store ID:** ${CONFIG.STORE_ID}\n\n`;
-      md += `---\n\n`;
-
-      // ── 1. GENEL ÖZET ──
-      md += `## 📋 Genel Özet\n\n`;
-      md += `Toplam **${fmt(total)}** NO_DATA ürün Amazon'da kontrol edildi.\n\n`;
-      md += `| Amazon Durumu | Sayı | Oran | Grafik |\n`;
-      md += `|--------------|-----:|-----:|--------|\n`;
-      md += `| ✅ Geçerli (OK) | ${fmt(okResults.length)} | %${pct(okResults.length, total)} | \`${bar(okResults.length, total)}\` |\n`;
-      md += `| 🔀 Yönlendirilen | ${fmt(redirected.length)} | %${pct(redirected.length, total)} | \`${bar(redirected.length, total)}\` |\n`;
-      md += `| 🤖 Captcha | ${fmt(captcha.length)} | %${pct(captcha.length, total)} | \`${bar(captcha.length, total)}\` |\n`;
-      md += `| ❌ Hata | ${fmt(errors.length)} | %${pct(errors.length, total)} | \`${bar(errors.length, total)}\` |\n`;
-      md += `\n---\n\n`;
-
-      // ── 2. PRICE / STOCK ANALİZİ ──
-      md += `## 📊 Price / Stock Analizi\n\n`;
-      md += `> Amazon'da geçerli bulunan **${fmt(okResults.length)}** ürün üzerinden.\n\n`;
-      md += `| Kategori | Sayı | Oran | Grafik |\n`;
-      md += `|---------|-----:|-----:|--------|\n`;
-      md += `| ✅ Sorunsuz (price ✓, stock ✓) | ${fmt(healthyCount)} | %${pct(healthyCount, okResults.length)} | \`${bar(healthyCount, okResults.length)}\` |\n`;
-      md += `| 🔴 Sadece price sorunu | ${fmt(onlyPriceIssue.length)} | %${pct(onlyPriceIssue.length, okResults.length)} | \`${bar(onlyPriceIssue.length, okResults.length)}\` |\n`;
-      md += `| 🟡 Sadece stok sorunu | ${fmt(onlyStockIssue.length)} | %${pct(onlyStockIssue.length, okResults.length)} | \`${bar(onlyStockIssue.length, okResults.length)}\` |\n`;
-      md += `| 🟠 Price + Stok sorunu | ${fmt(bothIssues.length)} | %${pct(bothIssues.length, okResults.length)} | \`${bar(bothIssues.length, okResults.length)}\` |\n`;
-      md += `| **Toplam sorunlu** | **${fmt(detailIssues.length)}** | **%${pct(detailIssues.length, okResults.length)}** | \`${bar(detailIssues.length, okResults.length)}\` |\n`;
-      md += `\n---\n\n`;
-
-      // ── 3. YÖNLENDİRİLEN ASIN'LER ──
-      if (redirected.length > 0) {
-        md += `## 🔀 Yönlendirilen ASIN'ler *(${fmt(redirected.length)} adet)*\n\n`;
-        md += `| Orijinal ASIN | Yönlendirilen ASIN | URL |\n`;
-        md += `|:-------------|:------------------|:----|\n`;
-        for (const r of redirected) {
-          md += `| \`${r.originalAsin}\` | \`${r.finalAsin || "-"}\` | ${r.finalUrl || "-"} |\n`;
-        }
-        md += `\n---\n\n`;
-      }
-
-      // Tablo satırı oluşturucu
-      const asinRow = (item) => {
-        const p = item.fields.price !== null ? `$${item.fields.price.toFixed(2)}` : "-";
-        const s = item.fields.stock !== null
-          ? (item.fields.stock >= 1000 ? "In Stock" : item.fields.stock === 0 ? "Out of Stock" : item.fields.stock)
-          : "-";
-        return `| \`${item.asin}\` | ${p} | ${s} |\n`;
-      };
-      const tableHeader = `| ASIN | Price | Stock |\n|:-----|------:|------:|\n`;
-
-      // ── 4. SADECE PRICE SORUNU ──
-      if (onlyPriceIssue.length > 0) {
-        md += `## 🔴 Sadece Price Sorunu *(${fmt(onlyPriceIssue.length)} ürün)*\n\n`;
-        md += `Amazon sayfasında fiyat bilgisi bulunamayan veya geçersiz olan ürünler.\n\n`;
-        md += tableHeader;
-        for (const item of onlyPriceIssue) md += asinRow(item);
-        md += `\n---\n\n`;
-      }
-
-      // ── 5. SADECE STOK SORUNU ──
-      if (onlyStockIssue.length > 0) {
-        md += `## 🟡 Sadece Stok Sorunu *(${fmt(onlyStockIssue.length)} ürün)*\n\n`;
-        md += `Fiyatı olan fakat Amazon'da stokta bulunmayan ürünler.\n\n`;
-        md += tableHeader;
-        for (const item of onlyStockIssue) md += asinRow(item);
-        md += `\n---\n\n`;
-      }
-
-      // ── 6. PRICE + STOK SORUNU ──
-      if (bothIssues.length > 0) {
-        md += `## 🟠 Price + Stok Sorunu *(${fmt(bothIssues.length)} ürün)*\n\n`;
-        md += `Amazon sayfasında hem fiyat hem stok bilgisi eksik/geçersiz olan ürünler.\n\n`;
-        md += tableHeader;
-        for (const item of bothIssues) md += asinRow(item);
-        md += `\n---\n\n`;
-      }
-
-      // ── 7. CAPTCHA / HATA ──
-      if (captcha.length > 0) {
-        md += `## 🤖 Captcha'ya Takılan ASIN'ler *(${fmt(captcha.length)} adet)*\n\n`;
-        md += captcha.map((r) => `- \`${r.originalAsin}\``).join("\n");
-        md += `\n\n---\n\n`;
-      }
-      if (errors.length > 0) {
-        md += `## ❌ Hata Alan ASIN'ler *(${fmt(errors.length)} adet)*\n\n`;
-        md += `| ASIN | Hata |\n|:-----|:-----|\n`;
-        for (const r of errors) {
-          md += `| \`${r.originalAsin}\` | ${r.error || "-"} |\n`;
-        }
-        md += `\n`;
-      }
-
-      fs.writeFileSync(reportFile, md);
-      console.log(`📄 Markdown raporu kaydedildi: ${reportFile}`);
     }
+
+    fs.writeFileSync(
+      detailFile,
+      JSON.stringify(
+        {
+          timestamp: new Date().toISOString(),
+          totalNotFound: total,
+          amazonSummary: {
+            ok: okResults.length,
+            redirected: redirected.length,
+            captcha: captcha.length,
+            errors: errors.length,
+          },
+          detailIssues,
+        },
+        null,
+        2,
+      ),
+    );
+    console.log(`💾 Detay sorunları kaydedildi: ${detailFile}`);
   } else {
     console.log("❌ Geçersiz seçim. Çıkılıyor.");
     process.exit(1);

@@ -4,7 +4,16 @@
       "Bash(node -e ' *)",
       "Bash(node -e \"console.log\\(decodeURIComponent\\('%7B%22type%22%3A%22and%22%2C%22predicates%22%3A%5B%7B%22property%22%3A%22storeProductStatus%22%2C%22type%22%3A%22eq%22%2C%22value%22%3A%22NO_DATA%22%7D%5D%7D'\\)\\)\")",
       "Bash(npm install *)",
-      "Bash(node --check index.js)"
+      "Bash(node --check index.js)",
+      "Bash(node --input-type=module --check)",
+      "Bash(npx puppeteer *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\necat\\\\OneDrive\\\\Masaüstü\\\\Syncrosale\\\\product-info-service\\\\src\" -Recurse -Directory)",
+      "Bash(Select-Object FullName)",
+      "Read(//c/Users/necat/OneDrive/Masaüstü/Syncrosale/product-info-service/src/**)",
+      "Bash(Get-ChildItem -Recurse -File)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(find \"C:\\\\Users\\\\necat\\\\OneDrive\\\\Masaüstü\\\\Syncrosale\\\\product-info-service\" -type f \\\\\\( -name \"application*.yml\" -o -name \"application*.yaml\" -o -name \"application*.properties\" \\\\\\) 2>&1)",
+      "Read(//c/Users/necat/OneDrive/Masaüstü/Syncrosale/product-info-service/**)"
     ]
   }
 }
