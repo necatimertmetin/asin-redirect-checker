@@ -229,10 +229,14 @@ async function fetchNotFoundProductsFromApi(
   page = 0,
   size = 100,
 ) {
-  const predicate = encodeURIComponent(JSON.stringify({
-    type: "and",
-    predicates: [{ property: "storeProductStatus", type: "eq", value: "NO_DATA" }],
-  }));
+  const predicate = encodeURIComponent(
+    JSON.stringify({
+      type: "and",
+      predicates: [
+        { property: "storeProductStatus", type: "eq", value: "NO_DATA" },
+      ],
+    }),
+  );
   const url = `${CONFIG.API_BASE}/store/${storeId}/product/detailed2?page=${page}&size=${size}&predicate=${predicate}`;
 
   const response = await fetch(url, {
@@ -334,7 +338,9 @@ function extractPriceFromHtml($) {
 }
 
 function isValidProductPage($) {
-  return $("#productTitle").length > 0 || $("[data-feature-name='title']").length > 0;
+  return (
+    $("#productTitle").length > 0 || $("[data-feature-name='title']").length > 0
+  );
 }
 
 // AmazonProductPageParser.extractStock
@@ -404,6 +410,7 @@ function extractAsinFromUrl(url) {
  */
 async function checkAsin(asin, parseDetails = false) {
   const amazonUrl = `https://www.${CONFIG.AMAZON_DOMAIN}/dp/${asin}`;
+  const t0 = Date.now();
 
   try {
     const controller = new AbortController();
@@ -436,13 +443,9 @@ async function checkAsin(asin, parseDetails = false) {
 
     if (isCaptchaUrl) {
       return {
-        originalAsin: asin,
-        finalAsin: null,
-        finalUrl,
-        status: "CAPTCHA",
-        redirected: false,
-        price: null,
-        stock: null,
+        originalAsin: asin, finalAsin: null, finalUrl,
+        status: "CAPTCHA", redirected: false, price: null, stock: null,
+        durationMs: Date.now() - t0,
       };
     }
 
@@ -456,7 +459,6 @@ async function checkAsin(asin, parseDetails = false) {
       const html = await res.text();
       const $ = cheerio.load(html);
 
-      // HTML içinde inline captcha veya bot engeli var mı kontrol et
       const title = $("title").text().toLowerCase();
       const hasCaptchaForm = $("form[action*='validateCaptcha']").length > 0;
       const isRobotCheck =
@@ -467,26 +469,17 @@ async function checkAsin(asin, parseDetails = false) {
 
       if (isRobotCheck) {
         return {
-          originalAsin: asin,
-          finalAsin: null,
-          finalUrl,
-          status: "CAPTCHA",
-          redirected: false,
-          price: null,
-          stock: null,
+          originalAsin: asin, finalAsin: null, finalUrl,
+          status: "CAPTCHA", redirected: false, price: null, stock: null,
+          durationMs: Date.now() - t0,
         };
       }
 
-      // Soft bot-block: Amazon served a structureless page without redirecting to captcha
       if (!isValidProductPage($)) {
         return {
-          originalAsin: asin,
-          finalAsin: null,
-          finalUrl,
-          status: "CAPTCHA",
-          redirected: false,
-          price: null,
-          stock: null,
+          originalAsin: asin, finalAsin: null, finalUrl,
+          status: "CAPTCHA", redirected: false, price: null, stock: null,
+          durationMs: Date.now() - t0,
         };
       }
 
@@ -497,33 +490,32 @@ async function checkAsin(asin, parseDetails = false) {
     }
 
     return {
-      originalAsin: asin,
-      finalAsin,
-      finalUrl,
+      originalAsin: asin, finalAsin, finalUrl,
       status: redirected ? "REDIRECTED" : "OK",
-      redirected,
-      price,
-      stock,
+      redirected, price, stock,
+      durationMs: Date.now() - t0,
     };
   } catch (error) {
     return {
-      originalAsin: asin,
-      finalAsin: null,
-      finalUrl: null,
-      status: "ERROR",
-      redirected: false,
-      price: null,
-      stock: null,
-      error: error.message,
+      originalAsin: asin, finalAsin: null, finalUrl: null,
+      status: "ERROR", redirected: false, price: null, stock: null,
+      error: error.message, durationMs: Date.now() - t0,
     };
   }
 }
 
 /**
- * Concurrent pool ile ASIN'leri kontrol eder, anlık sonuç gösterir
+ * Concurrent pool ile ASIN'leri HTTP fetch ile kontrol eder
  */
 async function checkAllAsins(asins, options = {}) {
-  const { parseDetails = false } = options;
+  const {
+    parseDetails = false,
+    concurrency = CONFIG.CONCURRENCY,
+    delayMs = CONFIG.DELAY_BETWEEN_MS,
+    onResult = null,
+    saveJson = true,
+  } = options;
+
   const results = [];
   let completed = 0;
   let redirectCount = 0;
@@ -537,10 +529,9 @@ async function checkAllAsins(asins, options = {}) {
   function printProgress() {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
     const rate = (completed / (elapsed || 1)).toFixed(1);
-    const eta =
-      completed > 0 ? ((total - completed) / rate / 60).toFixed(1) : "?";
+    const eta = completed > 0 ? ((total - completed) / rate / 60).toFixed(1) : "?";
     process.stdout.write(
-      `\r  [${completed}/${total}] ⏱${elapsed}s | ${rate}/s | ETA: ${eta}m | 🔀${redirectCount} 🤖${captchaCount} ❌${errorCount}   `,
+      `\r  ${completed}/${total} işlendi | ${rate} asin/sn | ${elapsed}sn geçti | ${eta}dk kaldı | 🔀${redirectCount} yönlendirme  🤖${captchaCount} captcha  ❌${errorCount} hata   `,
     );
   }
 
@@ -548,33 +539,24 @@ async function checkAllAsins(asins, options = {}) {
     const report = {
       timestamp: new Date().toISOString(),
       status: completed >= total ? "COMPLETE" : "IN_PROGRESS",
-      config: {
-        domain: CONFIG.AMAZON_DOMAIN,
-        storeId: CONFIG.STORE_ID,
-      },
+      config: { domain: CONFIG.AMAZON_DOMAIN, storeId: CONFIG.STORE_ID },
       summary: {
-        total,
-        checked: completed,
+        total, checked: completed,
         ok: results.filter((r) => r.status === "OK").length,
-        redirected: redirectCount,
-        captcha: captchaCount,
-        errors: errorCount,
+        redirected: redirectCount, captcha: captchaCount, errors: errorCount,
       },
       redirectedAsins: results
         .filter((r) => r.status === "REDIRECTED")
-        .map((r) => ({
-          original: r.originalAsin,
-          redirectedTo: r.finalAsin,
-          url: r.finalUrl,
-        })),
+        .map((r) => ({ original: r.originalAsin, redirectedTo: r.finalAsin, url: r.finalUrl })),
       allResults: results,
     };
     fs.writeFileSync(resultFile, JSON.stringify(report, null, 2));
   }
 
-  // Concurrent pool
   let idx = 0;
-  const workers = Array.from({ length: CONFIG.CONCURRENCY }, async () => {
+  let currentDelay = delayMs;
+
+  const workers = Array.from({ length: concurrency }, async () => {
     while (idx < total) {
       const currentIdx = idx++;
       const asin = asins[currentIdx];
@@ -585,35 +567,39 @@ async function checkAllAsins(asins, options = {}) {
 
       if (result.status === "REDIRECTED") {
         redirectCount++;
-        // Anlık göster
-        process.stdout.write(
-          `\n  🔀 ${result.originalAsin} → ${result.finalAsin}\n`,
-        );
+        process.stdout.write(`\n  🔀 ${result.originalAsin} → ${result.finalAsin}\n`);
       } else if (result.status === "CAPTCHA") {
         captchaCount++;
       } else if (result.status === "ERROR") {
         errorCount++;
       }
 
+      // Son 50 istekte captcha oranı %15'i geçerse delay artır, %3'ün altına düşerse azalt
+      if (completed >= 50) {
+        const last50 = results.slice(-50);
+        const captchaRate = last50.filter((r) => r.status === "CAPTCHA").length / 50;
+        if (captchaRate > 0.15 && currentDelay < 2000) {
+          currentDelay = Math.min(currentDelay + 200, 2000);
+          process.stdout.write(`\n  ⚠️  Captcha %${(captchaRate * 100).toFixed(0)} → delay ${currentDelay}ms'ye çıkarıldı\n`);
+        } else if (captchaRate < 0.03 && currentDelay > delayMs) {
+          currentDelay = Math.max(currentDelay - 100, delayMs);
+        }
+      }
+
       printProgress();
+      if (onResult) onResult(result, completed);
+      if (saveJson && completed % CONFIG.SAVE_EVERY === 0) saveProgressiveResults();
 
-      // Periyodik kayıt
-      if (completed % CONFIG.SAVE_EVERY === 0) {
-        saveProgressiveResults();
-      }
-
-      // Küçük delay (rate limit)
-      if (CONFIG.DELAY_BETWEEN_MS > 0) {
-        await new Promise((r) => setTimeout(r, CONFIG.DELAY_BETWEEN_MS));
-      }
+      if (currentDelay > 0) await new Promise((r) => setTimeout(r, currentDelay));
     }
   });
 
   await Promise.all(workers);
 
-  // Son kayıt
-  saveProgressiveResults();
-  console.log(`\n\n💾 Sonuçlar kaydedildi: ${resultFile}`);
+  if (saveJson) {
+    saveProgressiveResults();
+    console.log(`\n\n💾 Sonuçlar kaydedildi: ${resultFile}`);
+  }
 
   return results;
 }
@@ -673,7 +659,13 @@ function printReport(results) {
 
 // ==================== NO_DATA MD RAPORU ====================
 
-function generateNoDataReport(amazonResults, totalNotFound, storeId, syncroDataMap = {}, status = "IN_PROGRESS") {
+function generateNoDataReport(
+  amazonResults,
+  totalNotFound,
+  storeId,
+  syncroDataMap = {},
+  status = "IN_PROGRESS",
+) {
   const okResults = amazonResults.filter((r) => r.status === "OK");
   const redirected = amazonResults.filter((r) => r.status === "REDIRECTED");
   const captcha = amazonResults.filter((r) => r.status === "CAPTCHA");
@@ -684,23 +676,34 @@ function generateNoDataReport(amazonResults, totalNotFound, storeId, syncroDataM
     const issues = [];
     if (result.price === null) issues.push("price bulunamadı (Amazon)");
     else if (result.price <= 0) issues.push(`price geçersiz (${result.price})`);
-    if (result.stock === null || result.stock <= 0) issues.push("stok yok (Amazon)");
+    if (result.stock === null || result.stock <= 0)
+      issues.push("stok yok (Amazon)");
     if (issues.length > 0) {
-      detailIssues.push({ asin: result.originalAsin, issues, fields: { price: result.price, stock: result.stock } });
+      detailIssues.push({
+        asin: result.originalAsin,
+        issues,
+        fields: { price: result.price, stock: result.stock },
+      });
     }
   }
 
   const onlyPriceIssue = detailIssues.filter(
-    (i) => i.issues.some((x) => x.includes("price")) && !i.issues.some((x) => x.includes("stok"))
+    (i) =>
+      i.issues.some((x) => x.includes("price")) &&
+      !i.issues.some((x) => x.includes("stok")),
   );
   const onlyStockIssue = detailIssues.filter(
-    (i) => !i.issues.some((x) => x.includes("price")) && i.issues.some((x) => x.includes("stok"))
+    (i) =>
+      !i.issues.some((x) => x.includes("price")) &&
+      i.issues.some((x) => x.includes("stok")),
   );
   const bothIssues = detailIssues.filter(
-    (i) => i.issues.some((x) => x.includes("price")) && i.issues.some((x) => x.includes("stok"))
+    (i) =>
+      i.issues.some((x) => x.includes("price")) &&
+      i.issues.some((x) => x.includes("stok")),
   );
   const healthyAsins = okResults.filter(
-    (r) => !detailIssues.some((d) => d.asin === r.originalAsin)
+    (r) => !detailIssues.some((d) => d.asin === r.originalAsin),
   );
   const healthyCount = healthyAsins.length;
 
@@ -742,10 +745,17 @@ function generateNoDataReport(amazonResults, totalNotFound, storeId, syncroDataM
   md += `\n---\n\n`;
 
   const stockLabel = (v) =>
-    v === null ? "-" : v >= 1000 ? "In Stock" : v === 0 ? "Out of Stock" : String(v);
+    v === null
+      ? "-"
+      : v >= 1000
+        ? "In Stock"
+        : v === 0
+          ? "Out of Stock"
+          : String(v);
 
   const asinRow = (item) => {
-    const p = item.fields.price !== null ? `$${item.fields.price.toFixed(2)}` : "-";
+    const p =
+      item.fields.price !== null ? `$${item.fields.price.toFixed(2)}` : "-";
     const s = stockLabel(item.fields.stock);
     return `| \`${item.asin}\` | ${p} | ${s} |\n`;
   };
@@ -925,7 +935,8 @@ async function main() {
 
     if (fs.existsSync(asinCacheFile)) {
       console.log(`\n📂 Cache dosyası bulundu: ${asinCacheFile}`);
-      notFoundAsins = fs.readFileSync(asinCacheFile, "utf8")
+      notFoundAsins = fs
+        .readFileSync(asinCacheFile, "utf8")
         .split("\n")
         .map((l) => l.trim())
         .filter(Boolean);
@@ -962,68 +973,82 @@ async function main() {
       }
       fs.writeFileSync(asinCacheFile, notFoundAsins.join("\n"), "utf8");
       fs.writeFileSync(syncroCacheFile, JSON.stringify(syncroDataMap), "utf8");
-      console.log(`\n💾 ${notFoundAsins.length} ASIN cache'e yazıldı: ${asinCacheFile}`);
+      console.log(
+        `\n💾 ${notFoundAsins.length} ASIN cache'e yazıldı: ${asinCacheFile}`,
+      );
     }
 
     const total = notFoundAsins.length;
-    console.log(
-      `\n🥷 Amazon'da ${total} ASIN stealth mod ile kontrol ediliyor (3 tarayıcı)...\n`,
-    );
-
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     const reportFile = `NO_DATA_report_${ts}.md`;
     const detailFile = `NO_DATA_detail_issues_${ts}.json`;
 
-    const accumulatedResults = [];
-    const startTime = Date.now();
-    let captchaCount = 0;
-    let okCount = 0;
-    let redirectCount = 0;
+    // ── AŞAMA 1: HTTP fetch ile hızlı tarama ──────────────────────────────
+    console.log(`\n⚡ AŞAMA 1: HTTP fetch ile ${total} ASIN kontrol ediliyor (concurrency: 30)...\n`);
 
-    function printStealthProgress(completed) {
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-      const rate = (completed / (elapsed || 1)).toFixed(2);
-      const eta = completed > 0 ? ((total - completed) / rate / 60).toFixed(1) : "?";
-      process.stdout.write(
-        `\r  [${completed}/${total}] ⏱${elapsed}s | ${rate}/s | ETA: ${eta}m | ✅${okCount} 🤖${captchaCount} 🔀${redirectCount}   `,
-      );
-    }
-
-    const amazonResults = await checkAsinsWithStealth(notFoundAsins, {
-      concurrency: 3,
-      minDelayMs: 2000,
-      maxDelayMs: 5000,
+    const fetchAccumulated = [];
+    const fetchResults = await checkAllAsins(notFoundAsins, {
       parseDetails: true,
+      concurrency: 20,
+      delayMs: 150,
+      saveJson: false,
       onResult: (result, completed) => {
-        accumulatedResults.push(result);
-        if (result.status === "CAPTCHA") captchaCount++;
-        else if (result.status === "OK") okCount++;
-        else if (result.status === "REDIRECTED") {
-          redirectCount++;
-          process.stdout.write(`\n  🔀 ${result.originalAsin} → ${result.finalAsin}\n`);
-        }
-        printStealthProgress(completed);
-
+        fetchAccumulated.push(result);
         if (completed % CONFIG.SAVE_EVERY_MD === 0) {
-          const mdContent = generateNoDataReport(accumulatedResults, total, CONFIG.STORE_ID, syncroDataMap, "IN_PROGRESS");
-          fs.writeFileSync(reportFile, mdContent);
+          const md = generateNoDataReport(fetchAccumulated, total, CONFIG.STORE_ID, syncroDataMap, "IN_PROGRESS");
+          fs.writeFileSync(reportFile, md);
         }
       },
     });
 
+    const captchaAsins = fetchResults
+      .filter((r) => r.status === "CAPTCHA" || r.status === "ERROR")
+      .map((r) => r.originalAsin);
+
+    console.log(`\n✅ HTTP fetch tamamlandı. ${captchaAsins.length} ASIN captcha/hata → stealth retry yapılacak.\n`);
+
+    let allResults = fetchResults.filter((r) => r.status !== "CAPTCHA" && r.status !== "ERROR");
+
+    // ── AŞAMA 2: Captcha olanları stealth ile retry ────────────────────────
+    if (captchaAsins.length > 0) {
+      console.log(`\n🥷 AŞAMA 2: ${captchaAsins.length} ASIN stealth mod ile retry ediliyor (5 tarayıcı)...\n`);
+
+      const startTime2 = Date.now();
+      const retryResults = await checkAsinsWithStealth(captchaAsins, {
+        concurrency: 5,
+        minDelayMs: 1200,
+        maxDelayMs: 2500,
+        parseDetails: true,
+        onResult: (result, completed) => {
+          const secs = result.durationMs != null ? `${(result.durationMs / 1000).toFixed(1)}s` : "?s";
+          const elapsed = ((Date.now() - startTime2) / 1000).toFixed(0);
+          const rate = (completed / (elapsed || 1)).toFixed(2);
+          const eta = completed > 0 ? ((captchaAsins.length - completed) / rate / 60).toFixed(1) : "?";
+          if (result.status === "REDIRECTED") process.stdout.write(`\n  🔀 ${result.originalAsin} → ${result.finalAsin} (${secs})\n`);
+          else if (result.status === "CAPTCHA") process.stdout.write(`\n  🤖 ${result.originalAsin} → CAPTCHA yine (${secs})\n`);
+          else if (result.status === "OK") process.stdout.write(`\n  ✅ ${result.originalAsin} → OK (${secs})\n`);
+          else process.stdout.write(`\n  ❌ ${result.originalAsin} → ERROR (${secs})\n`);
+          process.stdout.write(`\r  [${completed}/${captchaAsins.length}] ⏱${elapsed}s | ${rate}/s | ETA: ${eta}m   `);
+        },
+      });
+
+      allResults = [...allResults, ...retryResults];
+      console.log(`\n\n✅ Stealth retry tamamlandı.`);
+    }
+
     console.log("\n");
-    printReport(amazonResults);
+    printReport(allResults);
 
     // Final MD raporu
-    const finalMd = generateNoDataReport(amazonResults, total, CONFIG.STORE_ID, syncroDataMap, "COMPLETE");
+    const finalMd = generateNoDataReport(allResults, total, CONFIG.STORE_ID, syncroDataMap, "COMPLETE");
     fs.writeFileSync(reportFile, finalMd);
     console.log(`\n📄 Markdown raporu kaydedildi: ${reportFile}`);
 
     // JSON özet
-    const okResults = amazonResults.filter((r) => r.status === "OK");
-    const redirected = amazonResults.filter((r) => r.status === "REDIRECTED");
-    const captcha = amazonResults.filter((r) => r.status === "CAPTCHA");
-    const errors = amazonResults.filter((r) => r.status === "ERROR");
+    const okResults = allResults.filter((r) => r.status === "OK");
+    const redirected = allResults.filter((r) => r.status === "REDIRECTED");
+    const captcha = allResults.filter((r) => r.status === "CAPTCHA");
+    const errors = allResults.filter((r) => r.status === "ERROR");
 
     const detailIssues = [];
     for (const result of okResults) {
@@ -1038,21 +1063,12 @@ async function main() {
 
     fs.writeFileSync(
       detailFile,
-      JSON.stringify(
-        {
-          timestamp: new Date().toISOString(),
-          totalNotFound: total,
-          amazonSummary: {
-            ok: okResults.length,
-            redirected: redirected.length,
-            captcha: captcha.length,
-            errors: errors.length,
-          },
-          detailIssues,
-        },
-        null,
-        2,
-      ),
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        totalNotFound: total,
+        amazonSummary: { ok: okResults.length, redirected: redirected.length, captcha: captcha.length, errors: errors.length },
+        detailIssues,
+      }, null, 2),
     );
     console.log(`💾 Detay sorunları kaydedildi: ${detailFile}`);
   } else {

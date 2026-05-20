@@ -90,9 +90,10 @@ function extractStockFromHtml($) {
 
 async function checkAsinOnPage(page, asin, parseDetails) {
   const url = `https://www.amazon.com/dp/${asin}`;
+  const t0 = Date.now();
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await new Promise((r) => setTimeout(r, 1200 + Math.random() * 800));
+    await new Promise((r) => setTimeout(r, 600 + Math.random() * 400));
 
     const currentUrl = page.url();
     const pageTitle = await page.title();
@@ -114,6 +115,7 @@ async function checkAsinOnPage(page, asin, parseDetails) {
         redirected: false,
         price: null,
         stock: null,
+        durationMs: Date.now() - t0,
       };
     }
 
@@ -130,6 +132,7 @@ async function checkAsinOnPage(page, asin, parseDetails) {
         redirected: true,
         price: null,
         stock: null,
+        durationMs: Date.now() - t0,
       };
     }
 
@@ -145,6 +148,7 @@ async function checkAsinOnPage(page, asin, parseDetails) {
         redirected: false,
         price: null,
         stock: null,
+        durationMs: Date.now() - t0,
       };
     }
 
@@ -159,6 +163,7 @@ async function checkAsinOnPage(page, asin, parseDetails) {
       redirected: false,
       price,
       stock,
+      durationMs: Date.now() - t0,
     };
   } catch (error) {
     return {
@@ -170,6 +175,7 @@ async function checkAsinOnPage(page, asin, parseDetails) {
       price: null,
       stock: null,
       error: error.message,
+      durationMs: Date.now() - t0,
     };
   }
 }
@@ -219,7 +225,7 @@ async function setDeliveryZip(page, zipCode) {
  */
 export async function checkAsinsWithStealth(asins, options = {}) {
   const {
-    concurrency = 3,
+    concurrency = 8,
     minDelayMs = 2000,
     maxDelayMs = 5000,
     parseDetails = true,
@@ -235,21 +241,38 @@ export async function checkAsinsWithStealth(asins, options = {}) {
   const pages = [];
 
   for (let i = 0; i < concurrency; i++) {
-   const browser = await puppeteerExtra.launch({
-  executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  headless: true,
-  args: [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-blink-features=AutomationControlled",
-  ],
-});
+    const browser = await puppeteerExtra.launch({
+      executablePath:
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-blink-features=AutomationControlled",
+      ],
+    });
     const page = await browser.newPage();
     await page.setViewport({
       width: 1280 + Math.floor(Math.random() * 120),
       height: 720 + Math.floor(Math.random() * 80),
     });
     await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+
+    // Block unnecessary resources to speed up page loads
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const type = req.resourceType();
+      if (
+        type === "image" ||
+        type === "stylesheet" ||
+        type === "font" ||
+        type === "media"
+      ) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
 
     if (zipCode) {
       await setDeliveryZip(page, zipCode);
