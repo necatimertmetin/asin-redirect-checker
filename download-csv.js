@@ -33,6 +33,18 @@ const accounts = {
     environment: "production",
     storeId: 1,
   },
+  sedat: {
+    username: "engdeals",
+    password: "Sesa2021.",
+    environment: "production",
+    storeId: 1,
+  },
+  sarper: {
+    username: "sarper",
+    password: "Sesa2021.",
+    environment: "production",
+    storeId: 1,
+  },
 };
 
 const EXPORT_DIR = "exports";
