@@ -6,7 +6,7 @@ import fs from "fs";
 puppeteerExtra.use(StealthPlugin());
 
 // ── Konfigürasyon ─────────────────────────────────────────────
-const INPUT_FILE = "asin-for-test.txt";
+const INPUT_FILE = "asins.txt";
 const CONCURRENCY = 3;
 const DELAY_MIN_MS = 1200;
 const DELAY_MAX_MS = 2800;
@@ -14,7 +14,7 @@ const SAVE_EVERY = 10;
 
 const MARKETS = [
   { key: "us", domain: "amazon.com", label: "Amazon US" },
-  { key: "ae", domain: "amazon.ae",  label: "Amazon AE" },
+  { key: "ae", domain: "amazon.ae", label: "Amazon AE" },
 ];
 
 // ── URL'den ASIN çıkar ────────────────────────────────────────
@@ -26,7 +26,9 @@ function extractAsinFromUrl(url) {
 }
 
 function randomDelay() {
-  const ms = Math.floor(Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS) + DELAY_MIN_MS);
+  const ms = Math.floor(
+    Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS) + DELAY_MIN_MS,
+  );
   return new Promise((r) => setTimeout(r, ms));
 }
 
@@ -73,7 +75,7 @@ async function checkAsinOnMarket(browser, asin, market) {
   try {
     page = await browser.newPage();
     await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     );
     await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
     await page.setViewport({ width: 1280, height: 800 });
@@ -83,7 +85,10 @@ async function checkAsinOnMarket(browser, asin, market) {
       if (frame === page.mainFrame()) finalUrl = frame.url();
     });
 
-    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.goto(startUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
     await new Promise((r) => setTimeout(r, 2500));
     finalUrl = page.url();
 
@@ -106,7 +111,12 @@ async function checkAsinOnMarket(browser, asin, market) {
 
     return { status, finalUrl, finalAsin, note };
   } catch (error) {
-    return { status: "ERROR", finalUrl: null, finalAsin: null, error: error.message };
+    return {
+      status: "ERROR",
+      finalUrl: null,
+      finalAsin: null,
+      error: error.message,
+    };
   } finally {
     if (page) await page.close().catch(() => {});
   }
@@ -147,16 +157,48 @@ function generateReport(results, totalCount, reportStatus = "IN_PROGRESS") {
 
   // Kombinasyon tanımları (öncelik sırasıyla)
   const COMBO_DEFS = [
-    { key: "FOUND__FOUND",         icon: "✅", label: "US: Found  |  AE: Found" },
-    { key: "FOUND__NOT_FOUND",     icon: "🟡", label: "US: Found  |  AE: Not Found" },
-    { key: "NOT_FOUND__FOUND",     icon: "🟠", label: "US: Not Found  |  AE: Found" },
-    { key: "NOT_FOUND__NOT_FOUND", icon: "❌", label: "US: Not Found  |  AE: Not Found" },
-    { key: "FOUND__CAPTCHA",       icon: "🟡", label: "US: Found  |  AE: Captcha (belirsiz)" },
-    { key: "CAPTCHA__FOUND",       icon: "🟠", label: "US: Captcha (belirsiz)  |  AE: Found" },
-    { key: "CAPTCHA__NOT_FOUND",   icon: "⚠️", label: "US: Captcha  |  AE: Not Found" },
-    { key: "NOT_FOUND__CAPTCHA",   icon: "⚠️", label: "US: Not Found  |  AE: Captcha" },
-    { key: "CAPTCHA__CAPTCHA",     icon: "🤖", label: "US: Captcha  |  AE: Captcha" },
-    { key: "ERROR__ERROR",         icon: "💥", label: "US: Error  |  AE: Error" },
+    { key: "FOUND__FOUND", icon: "✅", label: "US: Found  |  AE: Found" },
+    {
+      key: "FOUND__NOT_FOUND",
+      icon: "🟡",
+      label: "US: Found  |  AE: Not Found",
+    },
+    {
+      key: "NOT_FOUND__FOUND",
+      icon: "🟠",
+      label: "US: Not Found  |  AE: Found",
+    },
+    {
+      key: "NOT_FOUND__NOT_FOUND",
+      icon: "❌",
+      label: "US: Not Found  |  AE: Not Found",
+    },
+    {
+      key: "FOUND__CAPTCHA",
+      icon: "🟡",
+      label: "US: Found  |  AE: Captcha (belirsiz)",
+    },
+    {
+      key: "CAPTCHA__FOUND",
+      icon: "🟠",
+      label: "US: Captcha (belirsiz)  |  AE: Found",
+    },
+    {
+      key: "CAPTCHA__NOT_FOUND",
+      icon: "⚠️",
+      label: "US: Captcha  |  AE: Not Found",
+    },
+    {
+      key: "NOT_FOUND__CAPTCHA",
+      icon: "⚠️",
+      label: "US: Not Found  |  AE: Captcha",
+    },
+    {
+      key: "CAPTCHA__CAPTCHA",
+      icon: "🤖",
+      label: "US: Captcha  |  AE: Captcha",
+    },
+    { key: "ERROR__ERROR", icon: "💥", label: "US: Error  |  AE: Error" },
   ];
 
   // Dinamik olarak tanımda olmayan kombinasyonları da ekle
@@ -203,8 +245,12 @@ function generateReport(results, totalCount, reportStatus = "IN_PROGRESS") {
       md += `| ASIN | US | AE |\n`;
       md += `|:-----|:---|:---|\n`;
       for (const r of items) {
-        const usCell = r.us?.note ? `NOT_FOUND (${r.us.note})` : (r.us?.status || "-");
-        const aeCell = r.ae?.note ? `NOT_FOUND (${r.ae.note})` : (r.ae?.status || "-");
+        const usCell = r.us?.note
+          ? `NOT_FOUND (${r.us.note})`
+          : r.us?.status || "-";
+        const aeCell = r.ae?.note
+          ? `NOT_FOUND (${r.ae.note})`
+          : r.ae?.status || "-";
         md += `| \`${r.asin}\` | ${usCell} | ${aeCell} |\n`;
       }
     } else {
@@ -260,8 +306,8 @@ async function main() {
       puppeteerExtra.launch({
         headless: true,
         args: ["--no-sandbox", "--disable-setuid-sandbox", "--lang=en-US"],
-      })
-    )
+      }),
+    ),
   );
 
   let idx = 0;
@@ -279,19 +325,28 @@ async function main() {
       const aeS = result.ae?.status || "?";
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
       const rate = (completed / (elapsed || 1)).toFixed(2);
-      const eta = completed > 0 ? ((total - completed) / rate / 60).toFixed(1) : "?";
+      const eta =
+        completed > 0 ? ((total - completed) / rate / 60).toFixed(1) : "?";
 
       const icon =
-        usS === "FOUND" && aeS === "FOUND"   ? "✅" :
-        usS === "FOUND" || aeS === "FOUND"   ? "🟡" :
-        usS === "NOT_FOUND" && aeS === "NOT_FOUND" ? "❌" : "⚠️";
+        usS === "FOUND" && aeS === "FOUND"
+          ? "✅"
+          : usS === "FOUND" || aeS === "FOUND"
+            ? "🟡"
+            : usS === "NOT_FOUND" && aeS === "NOT_FOUND"
+              ? "❌"
+              : "⚠️";
 
       process.stdout.write(
-        `\r  ${icon} ${asin} | US: ${usS.padEnd(10)} AE: ${aeS.padEnd(10)} | ${completed}/${total} | ⏱${elapsed}s | ETA: ${eta}m   \n`
+        `\r  ${icon} ${asin} | US: ${usS.padEnd(10)} AE: ${aeS.padEnd(10)} | ${completed}/${total} | ⏱${elapsed}s | ETA: ${eta}m   \n`,
       );
 
       if (completed % SAVE_EVERY === 0 || completed === total) {
-        const md = generateReport(results, total, completed === total ? "COMPLETE" : "IN_PROGRESS");
+        const md = generateReport(
+          results,
+          total,
+          completed === total ? "COMPLETE" : "IN_PROGRESS",
+        );
         fs.writeFileSync(reportFile, md, "utf8");
         process.stdout.write(`  💾 ${reportFile} güncellendi\n`);
       }
@@ -301,6 +356,69 @@ async function main() {
   });
 
   await Promise.all(workers);
+
+  // ── Captcha retry döngüsü ─────────────────────────────────────
+  let retryRound = 0;
+  let captchaAsins = results
+    .filter((r) => r.us?.status === "CAPTCHA" || r.ae?.status === "CAPTCHA")
+    .map((r) => r.asin);
+
+  while (captchaAsins.length > 0) {
+    retryRound++;
+    console.log(
+      `\n🔄 Captcha retry turu ${retryRound}: ${captchaAsins.length} ASIN yeniden deneniyor...\n`,
+    );
+
+    const retryResults = [];
+    let retryIdx = 0;
+
+    const retryWorkers = browsers.map(async (browser) => {
+      while (retryIdx < captchaAsins.length) {
+        const ci = retryIdx++;
+        const asin = captchaAsins[ci];
+
+        await randomDelay();
+        const result = await checkAsin(browser, asin);
+        retryResults.push(result);
+
+        const usS = result.us?.status || "?";
+        const aeS = result.ae?.status || "?";
+        process.stdout.write(
+          `  🔄 [Tur ${retryRound}] ${asin} | US: ${usS.padEnd(10)} AE: ${aeS.padEnd(10)}\n`,
+        );
+      }
+    });
+
+    await Promise.all(retryWorkers);
+
+    // Sonuçları güncelle
+    for (const retryResult of retryResults) {
+      const existingIdx = results.findIndex((r) => r.asin === retryResult.asin);
+      if (existingIdx !== -1) {
+        // Sadece CAPTCHA olan marketleri güncelle, diğerini koru
+        const existing = results[existingIdx];
+        if (existing.us?.status === "CAPTCHA") existing.us = retryResult.us;
+        if (existing.ae?.status === "CAPTCHA") existing.ae = retryResult.ae;
+      }
+    }
+
+    const md = generateReport(results, total, "COMPLETE");
+    fs.writeFileSync(reportFile, md, "utf8");
+    process.stdout.write(`  💾 ${reportFile} güncellendi\n`);
+
+    // Hâlâ captcha kalanları bul
+    captchaAsins = results
+      .filter((r) => r.us?.status === "CAPTCHA" || r.ae?.status === "CAPTCHA")
+      .map((r) => r.asin);
+
+    if (captchaAsins.length > 0) {
+      console.log(
+        `  ⏳ ${captchaAsins.length} ASIN hâlâ captcha, tekrar denenecek...`,
+      );
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+
   await Promise.all(browsers.map((b) => b.close().catch(() => {})));
 
   const finalMd = generateReport(results, total, "COMPLETE");

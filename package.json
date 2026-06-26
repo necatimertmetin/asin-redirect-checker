@@ -4,8 +4,8 @@
   "description": "Syncrosale envanterindeki ASIN'lerin Amazon'da farklı varyasyona yönlendirilip yönlendirilmediğini kontrol eder",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "check": "node index.js"
+    "start": "node --max-old-space-size=4096 index.js",
+    "check": "node --max-old-space-size=4096 index.js"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

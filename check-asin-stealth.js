@@ -47,6 +47,26 @@ function isValidProductPage($) {
   );
 }
 
+function extractLandingAsin($) {
+  // 1) #dp[data-asin]
+  const dp = $("#dp[data-asin]").first();
+  if (dp.length && dp.attr("data-asin")) return dp.attr("data-asin").trim().toUpperCase();
+
+  // 2) #centerCol [data-asin]
+  const centerCol = $("#centerCol [data-asin]").first();
+  if (centerCol.length && centerCol.attr("data-asin")) return centerCol.attr("data-asin").trim().toUpperCase();
+
+  // 3) [data-asin][data-marketplace]
+  const marketplace = $("[data-asin][data-marketplace]").first();
+  if (marketplace.length && marketplace.attr("data-asin")) return marketplace.attr("data-asin").trim().toUpperCase();
+
+  // 4) input#ASIN
+  const asinInput = $("input#ASIN").first();
+  if (asinInput.length && asinInput.attr("value")) return asinInput.attr("value").trim().toUpperCase();
+
+  return null;
+}
+
 function extractStockFromHtml($) {
   let availSpan = $("#primeSavingsUpsellAccordionRow");
   if (!availSpan.length) availSpan = $("#newAccordionRow_0");
@@ -119,23 +139,6 @@ async function checkAsinOnPage(page, asin, parseDetails) {
       };
     }
 
-    const finalAsinMatch = currentUrl.match(/\/dp\/([A-Z0-9]{10})/i);
-    const finalAsin = finalAsinMatch ? finalAsinMatch[1].toUpperCase() : null;
-    const redirected = finalAsin !== null && finalAsin !== asin.toUpperCase();
-
-    if (redirected) {
-      return {
-        originalAsin: asin,
-        finalAsin,
-        finalUrl: currentUrl,
-        status: "REDIRECTED",
-        redirected: true,
-        price: null,
-        stock: null,
-        durationMs: Date.now() - t0,
-      };
-    }
-
     const html = await page.content();
     const $ = cheerio.load(html);
 
@@ -152,12 +155,27 @@ async function checkAsinOnPage(page, asin, parseDetails) {
       };
     }
 
+    // HTML içindeki data-asin ile redirect kontrolü
+    const landingAsin = extractLandingAsin($);
+    if (landingAsin && landingAsin !== asin.toUpperCase()) {
+      return {
+        originalAsin: asin,
+        finalAsin: landingAsin,
+        finalUrl: currentUrl,
+        status: "REDIRECTED",
+        redirected: true,
+        price: null,
+        stock: null,
+        durationMs: Date.now() - t0,
+      };
+    }
+
     const price = parseDetails ? extractPriceFromHtml($) : null;
     const stock = parseDetails ? extractStockFromHtml($) : null;
 
     return {
       originalAsin: asin,
-      finalAsin,
+      finalAsin: landingAsin,
       finalUrl: currentUrl,
       status: "OK",
       redirected: false,
@@ -219,9 +237,65 @@ async function setDeliveryZip(page, zipCode) {
   }
 }
 
+const CHROME_ARGS = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-blink-features=AutomationControlled",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--no-first-run",
+  "--no-zygote",
+  "--disable-extensions",
+  "--disable-background-networking",
+  "--disable-sync",
+  "--metrics-recording-only",
+  "--disable-default-apps",
+  "--mute-audio",
+  "--no-default-browser-check",
+  "--disk-cache-size=0",
+  "--media-cache-size=0",
+];
+
+async function launchBrowser() {
+  const browser = await puppeteerExtra.launch({
+    executablePath:
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    headless: true,
+    args: CHROME_ARGS,
+  });
+  return browser;
+}
+
+async function createPage(browser, zipCode) {
+  const page = await browser.newPage();
+  await page.setCacheEnabled(false);
+  await page.setViewport({
+    width: 1280 + Math.floor(Math.random() * 120),
+    height: 720 + Math.floor(Math.random() * 80),
+  });
+  await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+
+  await page.setRequestInterception(true);
+  page.on("request", (req) => {
+    const type = req.resourceType();
+    if (type === "image" || type === "stylesheet" || type === "font" || type === "media") {
+      req.abort();
+    } else {
+      req.continue();
+    }
+  });
+
+  if (zipCode) {
+    await setDeliveryZip(page, zipCode);
+  }
+
+  return page;
+}
+
 /**
  * Stealth Puppeteer browser pool ile ASIN listesini kontrol eder.
  * onResult(result, completedCount, total) callback'i her sonuçta çağrılır.
+ * Bellek sızıntısını önlemek için her BROWSER_RESTART_EVERY sayfada tarayıcı yeniden başlatılır.
  */
 export async function checkAsinsWithStealth(asins, options = {}) {
   const {
@@ -231,76 +305,44 @@ export async function checkAsinsWithStealth(asins, options = {}) {
     parseDetails = true,
     zipCode = "07004",
     onResult = null,
+    browserRestartEvery = 150,
   } = options;
 
   const results = [];
   let idx = 0;
   const total = asins.length;
 
-  const browsers = [];
-  const pages = [];
+  async function worker(workerIndex) {
+    let browser = await launchBrowser();
+    let page = await createPage(browser, zipCode);
+    let pageCount = 0;
 
-  for (let i = 0; i < concurrency; i++) {
-    const browser = await puppeteerExtra.launch({
-      executablePath:
-        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-blink-features=AutomationControlled",
-      ],
-    });
-    const page = await browser.newPage();
-    await page.setViewport({
-      width: 1280 + Math.floor(Math.random() * 120),
-      height: 720 + Math.floor(Math.random() * 80),
-    });
-    await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
-
-    // Block unnecessary resources to speed up page loads
-    await page.setRequestInterception(true);
-    page.on("request", (req) => {
-      const type = req.resourceType();
-      if (
-        type === "image" ||
-        type === "stylesheet" ||
-        type === "font" ||
-        type === "media"
-      ) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
-    if (zipCode) {
-      await setDeliveryZip(page, zipCode);
-    }
-
-    browsers.push(browser);
-    pages.push(page);
-  }
-
-  async function worker(page) {
     while (idx < total) {
       const currentIdx = idx++;
       const asin = asins[currentIdx];
 
+      // Restart browser periodically to prevent memory accumulation
+      if (pageCount > 0 && pageCount % browserRestartEvery === 0) {
+        await browser.close().catch(() => {});
+        browser = await launchBrowser();
+        page = await createPage(browser, zipCode);
+        process.stdout.write(`\n  ♻️  Worker ${workerIndex}: tarayıcı yeniden başlatıldı (${pageCount} sayfa)\n`);
+      }
+
       const result = await checkAsinOnPage(page, asin, parseDetails);
       results.push(result);
+      pageCount++;
 
       if (onResult) onResult(result, results.length, total);
 
-      const delay =
-        minDelayMs + Math.floor(Math.random() * (maxDelayMs - minDelayMs));
+      const delay = minDelayMs + Math.floor(Math.random() * (maxDelayMs - minDelayMs));
       await new Promise((r) => setTimeout(r, delay));
     }
+
+    await browser.close().catch(() => {});
   }
 
-  await Promise.all(pages.map((p) => worker(p)));
-
-  for (const b of browsers) await b.close().catch(() => {});
+  await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)));
 
   return results;
 }
